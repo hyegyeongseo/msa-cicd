@@ -1,0 +1,16 @@
+# 환경 변수
+.env
+
+# Gradle
+.gradle/
+build/
+!**/src/main/**/build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

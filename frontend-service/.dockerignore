@@ -1,0 +1,23 @@
+# .dockerignore
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+*.iml
+.vscode
+
+# Gradle 빌드 산출물
+build
+!build/libs/*.jar
+.gradle
+
+# 문서
+README.md
+LICENSE
+
+# 환경 파일
+.env
+.env.*
