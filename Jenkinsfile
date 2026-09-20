@@ -6,11 +6,19 @@
 //  - Jenkins Credentials(System 범위)에 'dockerhub-credentials' (Username with password)가 등록되어 있다.
 //  - Docker Hub에 hkseo01/msa-user-service, hkseo01/msa-order-service, hkseo01/msa-frontend
 //    리포지토리가 이미 만들어져 있다 (Public).
+//  - Deploy 단계용 Credentials 가 등록되어 있다:
+//      msa-vm-ssh (SSH Username with private key), msa-secrets (Secret file: DB 비밀번호 secrets.yml)
+//  - Jenkins 이미지에 ansible-core + community.docker 가 설치되어 있고, VM 에는 Docker 가 설치되어 있다.
 pipeline {
     agent any
 
     environment {
         REGISTRY_NAMESPACE = 'hkseo01'
+    }
+
+    // Jenkins 가 localhost 에 있어서 GitHub webhook 을 받을 수 없으므로 2분마다 변경을 확인한다.
+    triggers {
+        pollSCM('H/2 * * * *')
     }
 
     stages {
@@ -88,11 +96,35 @@ pipeline {
                 }
             }
         }
+
+        stage('Deploy to VM') {
+            steps {
+                // Ansible 이 VM 에 SSH 로 접속해 방금 push 한 이미지(IMAGE_TAG)로 배포한다.
+                // SSH 개인키와 DB 비밀번호 파일은 Jenkins Credentials 에서 실행 시점에만 꺼내 쓴다.
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'msa-vm-ssh',
+                        keyFileVariable: 'VM_SSH_KEY',
+                        usernameVariable: 'VM_SSH_USER'
+                    ),
+                    file(credentialsId: 'msa-secrets', variable: 'SECRETS_FILE')
+                ]) {
+                    sh '''
+                        cd ansible
+                        ansible-playbook -i inventory.ini deploy.yml \
+                          -e image_tag=${IMAGE_TAG} \
+                          -e ansible_user=${VM_SSH_USER} \
+                          -e ansible_ssh_private_key_file=${VM_SSH_KEY} \
+                          -e @${SECRETS_FILE}
+                    '''
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo "빌드/푸시 성공: 태그 ${env.IMAGE_TAG}"
+            echo "빌드/푸시/배포 성공: 태그 ${env.IMAGE_TAG}"
         }
         failure {
             echo "빌드 실패: 로그를 확인하세요."
