@@ -19,4 +19,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
+# CD 단계에서 VM에 SSH로 접속해 배포하기 위한 Ansible.
+# docker compose 배포용 모듈(community.docker.docker_compose_v2)은 별도 collection이라 함께 설치한다.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ansible-core openssh-client && \
+    ansible-galaxy collection install community.docker -p /usr/share/ansible/collections && \
+    rm -rf /var/lib/apt/lists/*
+
 USER jenkins

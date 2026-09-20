@@ -14,3 +14,5 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+# Ansible secrets (실제 비밀번호 파일)
+ansible/secrets.yml

@@ -1,0 +1,91 @@
+# MSA VM 배포 플레이북
+#
+# 실행 예 (Jenkins 컨테이너 안에서):
+#   ansible-playbook -i inventory.ini deploy.yml -e image_tag=<태그> -e @/path/to/secrets.yml
+#
+# 전제: VM에 Docker Engine + compose plugin 이 설치되어 있고, 접속 사용자가 sudo 가능해야 한다.
+- name: Deploy MSA to VM
+  hosts: msa_vm
+  become: true
+  vars:
+    registry_namespace: hkseo01
+    app_dir: /opt/msa
+  pre_tasks:
+    - name: image_tag 지정 여부 확인
+      ansible.builtin.assert:
+        that: image_tag is defined and image_tag | length > 0
+        fail_msg: "-e image_tag=<태그> 를 지정해야 합니다."
+
+  tasks:
+    - name: Docker 설치 확인
+      ansible.builtin.command: docker --version
+      changed_when: false
+
+    - name: Docker Compose plugin 설치 확인
+      ansible.builtin.command: docker compose version
+      changed_when: false
+
+    - name: 애플리케이션 디렉터리 생성
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: docker-compose.yml 전달
+      ansible.builtin.copy:
+        src: files/docker-compose.yml
+        dest: "{{ app_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: .env 생성 (비밀번호 포함, 로그에 출력하지 않음)
+      ansible.builtin.template:
+        src: templates/env.j2
+        dest: "{{ app_dir }}/.env"
+        mode: "0600"
+      no_log: true
+
+    - name: 이미지 pull 및 컨테이너 실행
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        pull: always
+        remove_orphans: true
+        state: present
+
+    # 앱에 Actuator가 없어서 /order 에 GET 을 보내면 405 가 돌아오는 것으로 기동 여부를 판단한다.
+    - name: user-service 기동 확인
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081/order
+        status_code: [405]
+      register: user_health
+      until: user_health.status == 405
+      retries: 30
+      delay: 5
+
+    - name: order-service 기동 확인
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8082/order
+        status_code: [405]
+      register: order_health
+      until: order_health.status == 405
+      retries: 30
+      delay: 5
+
+    - name: frontend 기동 확인
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000/
+        status_code: [200]
+      register: frontend_health
+      until: frontend_health.status == 200
+      retries: 12
+      delay: 5
+
+    - name: 컨테이너 상태 조회
+      ansible.builtin.command: docker compose ps
+      args:
+        chdir: "{{ app_dir }}"
+      register: compose_ps
+      changed_when: false
+
+    - name: 배포 결과
+      ansible.builtin.debug:
+        msg: "{{ compose_ps.stdout_lines }}"
