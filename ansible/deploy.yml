@@ -6,7 +6,9 @@
 # 전제: VM에 Docker Engine + compose plugin 이 설치되어 있고, 접속 사용자가 sudo 가능해야 한다.
 #
 # 롤백: 새 버전(image_tag) 배포나 헬스체크가 실패하면, 배포 직전에 떠 있던 버전으로 되돌리고
-#       플레이북을 실패로 끝낸다(Jenkins 빌드도 실패로 표시된다). 이전 버전은 VM의 .env 에서 읽는다.
+#       플레이북을 실패로 끝낸다(Jenkins 빌드도 실패로 표시된다).
+#       "직전 버전"은 VM 의 <app_dir>/releases/current_tag(마지막으로 정상 배포된 태그)에서 읽고,
+#       배포가 끝까지 성공했을 때만 current_tag / previous_tag 를 갱신한다.
 - name: Deploy MSA to VM
   hosts: msa_vm
   become: true
@@ -40,16 +42,29 @@
         dest: "{{ app_dir }}/docker-compose.yml"
         mode: "0644"
 
-    # 첫 배포라면 .env 가 없어서 빈 값이 되고, 그 경우엔 롤백할 대상이 없다.
-    - name: 롤백 대상(현재 배포된 태그) 조회
-      ansible.builtin.shell: "grep '^IMAGE_TAG=' {{ app_dir }}/.env | cut -d= -f2"
-      register: current_tag
+    - name: 릴리스 기록 디렉터리 생성
+      ansible.builtin.file:
+        path: "{{ app_dir }}/releases"
+        state: directory
+        mode: "0755"
+
+    # 롤백 대상 = 마지막으로 정상 배포된 태그(releases/current_tag).
+    # 이 기능을 도입하기 전부터 떠 있던 VM 에는 파일이 아직 없으므로, 그때만 .env 의 값으로 대신한다.
+    # 첫 배포라면 둘 다 없어서 빈 값이 되고, 그 경우엔 롤백할 대상이 없다.
+    - name: 롤백 대상(마지막으로 정상 배포된 태그) 조회
+      ansible.builtin.shell: |
+        if [ -s {{ app_dir }}/releases/current_tag ]; then
+          cat {{ app_dir }}/releases/current_tag
+        else
+          grep '^IMAGE_TAG=' {{ app_dir }}/.env 2>/dev/null | cut -d= -f2
+        fi
+      register: last_good
       changed_when: false
       failed_when: false
 
     - name: 롤백 대상 태그 저장
       ansible.builtin.set_fact:
-        previous_tag: "{{ current_tag.stdout | default('') | trim }}"
+        previous_tag: "{{ last_good.stdout | default('') | trim }}"
 
     - name: "새 버전 배포 ({{ image_tag }}) - 실패하면 이전 버전으로 되돌린다"
       block:
@@ -88,3 +103,18 @@
               {% else %}
               롤백할 이전 버전이 없어 되돌리지 못했습니다.
               {% endif %}
+
+    # 아래 작업은 위 block 이 끝까지 성공했을 때만 실행된다.
+    # (실패하면 rescue 가 마지막에 fail 로 플레이를 끝내므로 여기까지 오지 않는다.)
+    - name: 릴리스 기록 - 직전 버전 보관 (previous_tag)
+      ansible.builtin.copy:
+        content: "{{ previous_tag }}\n"
+        dest: "{{ app_dir }}/releases/previous_tag"
+        mode: "0644"
+      when: previous_tag | length > 0 and previous_tag != image_tag
+
+    - name: 릴리스 기록 - 현재 버전 (current_tag)
+      ansible.builtin.copy:
+        content: "{{ image_tag }}\n"
+        dest: "{{ app_dir }}/releases/current_tag"
+        mode: "0644"

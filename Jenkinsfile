@@ -1,4 +1,6 @@
-// MSA CI 파이프라인: Checkout -> Test -> Docker Image Build -> Docker Image Tag -> Container Registry Push
+// MSA CI/CD 파이프라인:
+//   Checkout -> Test -> Docker Image Build -> Docker Image Tag -> Container Registry Push
+//   -> Deploy to VM (Ansible) -> Promote latest (배포 성공 후에만)
 //
 // 전제:
 //  - Jenkins가 Docker 컨테이너(local/jenkins-docker)로 떠 있고, 호스트 docker.sock을 마운트해서
@@ -89,12 +91,10 @@ pipeline {
                     sh '''
                         echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
 
+                        # 여기서는 커밋 SHA 태그만 올린다. latest 는 배포가 성공한 뒤(Promote latest)에 올린다.
                         docker push ${REGISTRY_NAMESPACE}/msa-user-service:${IMAGE_TAG}
-                        docker push ${REGISTRY_NAMESPACE}/msa-user-service:latest
                         docker push ${REGISTRY_NAMESPACE}/msa-order-service:${IMAGE_TAG}
-                        docker push ${REGISTRY_NAMESPACE}/msa-order-service:latest
                         docker push ${REGISTRY_NAMESPACE}/msa-frontend:${IMAGE_TAG}
-                        docker push ${REGISTRY_NAMESPACE}/msa-frontend:latest
 
                         docker logout
                     '''
@@ -121,6 +121,28 @@ pipeline {
                           -e ansible_user=${VM_SSH_USER} \
                           -e ansible_ssh_private_key_file=${VM_SSH_KEY} \
                           -e @${SECRETS_FILE}
+                    '''
+                }
+            }
+        }
+
+        stage('Promote latest') {
+            // 배포(헬스체크 포함)가 성공한 버전만 latest 로 올린다.
+            // Deploy to VM 이 실패하면 이 stage 는 실행되지 않으므로 latest 는 마지막 성공 버전을 가리킨다.
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKERHUB_USER',
+                    passwordVariable: 'DOCKERHUB_PASS'
+                )]) {
+                    sh '''
+                        echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+
+                        docker push ${REGISTRY_NAMESPACE}/msa-user-service:latest
+                        docker push ${REGISTRY_NAMESPACE}/msa-order-service:latest
+                        docker push ${REGISTRY_NAMESPACE}/msa-frontend:latest
+
+                        docker logout
                     '''
                 }
             }
