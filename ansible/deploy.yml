@@ -4,6 +4,9 @@
 #   ansible-playbook -i inventory.ini deploy.yml -e image_tag=<태그> -e @/path/to/secrets.yml
 #
 # 전제: VM에 Docker Engine + compose plugin 이 설치되어 있고, 접속 사용자가 sudo 가능해야 한다.
+#
+# 롤백: 새 버전(image_tag) 배포나 헬스체크가 실패하면, 배포 직전에 떠 있던 버전으로 되돌리고
+#       플레이북을 실패로 끝낸다(Jenkins 빌드도 실패로 표시된다). 이전 버전은 VM의 .env 에서 읽는다.
 - name: Deploy MSA to VM
   hosts: msa_vm
   become: true
@@ -37,55 +40,51 @@
         dest: "{{ app_dir }}/docker-compose.yml"
         mode: "0644"
 
-    - name: .env 생성 (비밀번호 포함, 로그에 출력하지 않음)
-      ansible.builtin.template:
-        src: templates/env.j2
-        dest: "{{ app_dir }}/.env"
-        mode: "0600"
-      no_log: true
-
-    - name: 이미지 pull 및 컨테이너 실행
-      community.docker.docker_compose_v2:
-        project_src: "{{ app_dir }}"
-        pull: always
-        remove_orphans: true
-        state: present
-
-    # 앱에 Actuator가 없어서 /order 에 GET 을 보내면 405 가 돌아오는 것으로 기동 여부를 판단한다.
-    - name: user-service 기동 확인
-      ansible.builtin.uri:
-        url: http://127.0.0.1:8081/order
-        status_code: [405]
-      register: user_health
-      until: user_health.status == 405
-      retries: 30
-      delay: 5
-
-    - name: order-service 기동 확인
-      ansible.builtin.uri:
-        url: http://127.0.0.1:8082/order
-        status_code: [405]
-      register: order_health
-      until: order_health.status == 405
-      retries: 30
-      delay: 5
-
-    - name: frontend 기동 확인
-      ansible.builtin.uri:
-        url: http://127.0.0.1:3000/
-        status_code: [200]
-      register: frontend_health
-      until: frontend_health.status == 200
-      retries: 12
-      delay: 5
-
-    - name: 컨테이너 상태 조회
-      ansible.builtin.command: docker compose ps
-      args:
-        chdir: "{{ app_dir }}"
-      register: compose_ps
+    # 첫 배포라면 .env 가 없어서 빈 값이 되고, 그 경우엔 롤백할 대상이 없다.
+    - name: 롤백 대상(현재 배포된 태그) 조회
+      ansible.builtin.shell: "grep '^IMAGE_TAG=' {{ app_dir }}/.env | cut -d= -f2"
+      register: current_tag
       changed_when: false
+      failed_when: false
 
-    - name: 배포 결과
-      ansible.builtin.debug:
-        msg: "{{ compose_ps.stdout_lines }}"
+    - name: 롤백 대상 태그 저장
+      ansible.builtin.set_fact:
+        previous_tag: "{{ current_tag.stdout | default('') | trim }}"
+
+    - name: "새 버전 배포 ({{ image_tag }}) - 실패하면 이전 버전으로 되돌린다"
+      block:
+        - name: "{{ image_tag }} 배포"
+          ansible.builtin.include_tasks: tasks/release.yml
+          vars:
+            release_tag: "{{ image_tag }}"
+
+      rescue:
+        - name: 실패 원인 수집 (컨테이너 상태와 앱 로그 일부)
+          ansible.builtin.shell: |
+            docker compose ps -a
+            docker compose logs --tail=20 user-service order-service frontend
+          args:
+            chdir: "{{ app_dir }}"
+          register: failure_info
+          changed_when: false
+          failed_when: false
+
+        - name: 실패 정보 출력
+          ansible.builtin.debug:
+            msg: "{{ failure_info.stdout_lines | default([]) }}"
+
+        - name: "이전 버전({{ previous_tag }})으로 롤백"
+          ansible.builtin.include_tasks: tasks/release.yml
+          vars:
+            release_tag: "{{ previous_tag }}"
+          when: previous_tag | length > 0 and previous_tag != image_tag
+
+        - name: 배포 실패 처리 (파이프라인을 실패로 표시)
+          ansible.builtin.fail:
+            msg: >-
+              {{ image_tag }} 배포에 실패했습니다.
+              {% if previous_tag | length > 0 and previous_tag != image_tag %}
+              이전 버전 {{ previous_tag }} 으로 롤백했습니다.
+              {% else %}
+              롤백할 이전 버전이 없어 되돌리지 못했습니다.
+              {% endif %}

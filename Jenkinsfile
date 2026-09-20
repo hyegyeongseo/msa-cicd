@@ -16,6 +16,11 @@ pipeline {
         REGISTRY_NAMESPACE = 'hkseo01'
     }
 
+    options {
+        // 두 배포가 동시에 VM 을 바꾸면 롤백 기준(직전 버전)이 흔들리므로 한 번에 하나만 실행한다.
+        disableConcurrentBuilds()
+    }
+
     // Jenkins 가 localhost 에 있어서 GitHub webhook 을 받을 수 없으므로 2분마다 변경을 확인한다.
     triggers {
         pollSCM('H/2 * * * *')

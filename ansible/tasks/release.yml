@@ -1,0 +1,54 @@
+# 한 버전(release_tag)을 VM에 적용하고 기동 여부를 확인한다.
+# deploy.yml 에서 "새 버전 배포"와 "실패 시 롤백" 두 곳이 같은 작업을 재사용한다.
+- name: ".env 생성 (태그: {{ release_tag }}, 비밀번호 포함이라 로그에 출력하지 않음)"
+  ansible.builtin.template:
+    src: templates/env.j2
+    dest: "{{ app_dir }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: "이미지 pull 및 컨테이너 실행 ({{ release_tag }})"
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    pull: always
+    remove_orphans: true
+    state: present
+
+# 앱에 Actuator가 없어서 /order 에 GET 을 보내면 405 가 돌아오는 것으로 기동 여부를 판단한다.
+- name: user-service 기동 확인
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8081/order
+    status_code: [405]
+  register: user_health
+  until: user_health.status == 405
+  retries: 30
+  delay: 5
+
+- name: order-service 기동 확인
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8082/order
+    status_code: [405]
+  register: order_health
+  until: order_health.status == 405
+  retries: 30
+  delay: 5
+
+- name: frontend 기동 확인
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3000/
+    status_code: [200]
+  register: frontend_health
+  until: frontend_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: 컨테이너 상태 조회
+  ansible.builtin.command: docker compose ps
+  args:
+    chdir: "{{ app_dir }}"
+  register: compose_ps
+  changed_when: false
+
+- name: "배포 결과 ({{ release_tag }})"
+  ansible.builtin.debug:
+    msg: "{{ compose_ps.stdout_lines }}"
